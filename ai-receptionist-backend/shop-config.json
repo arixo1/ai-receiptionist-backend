@@ -1,0 +1,52 @@
+{
+  "shop_id": "smoking-valley-edinburg",
+  "identity": {
+    "legal_name": "Smoking Valley Edinburg",
+    "display_name": "Smoking Valley",
+    "address": "335 W Trenton Rd, Edinburg, TX 78539",
+    "phone": "",
+    "timezone": "America/Chicago",
+    "hours_display": "Open daily 9:30 AM - 1:00 AM",
+    "tone": "casual",
+    "greeting_message": "👋 Hi! Welcome to Smoking Valley Edinburg. I can help you with products, pricing, hours, and directions. What would you like to know?"
+  },
+
+  "compliance": {
+    "require_age_verification": true,
+    "min_age": 21,
+    "verification_prompt": "Before we get started — you must be 21 or older to chat with us about our products. Are you 21 or older?",
+    "verification_fail_message": "Sorry, we're unable to share product info if you're under 21. Feel free to stop by or call us with general questions!"
+  },
+
+  "pos_connection": {
+    "provider": "square",
+    "connected": false,
+    "location_id": null,
+    "access_token": null,
+    "last_synced": null,
+    "mock_catalog": []
+  },
+
+  "products": {
+    "categories": [
+      {
+        "key": "example_category",
+        "label": "Example Category",
+        "keywords": ["example", "sample"],
+        "items": [
+          {
+            "name": "Replace with a real product name",
+            "price": "$0.00",
+            "details": "Replace with real details — this is placeholder data so the engine has something to render."
+          }
+        ]
+      }
+    ]
+  },
+
+  "quick_questions": [
+    "What are your store hours?",
+    "Where are you located?",
+    "What products do you carry?"
+  ]
+}
