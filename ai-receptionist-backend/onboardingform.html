@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>New Shop Setup</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0a; color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    padding: 3rem 1.5rem 6rem; max-width: 640px; margin: 0 auto;
+  }
+  h1 { font-size: 24px; font-weight: 500; margin-bottom: 6px; }
+  .sub { font-size: 13px; color: #888; margin-bottom: 2.5rem; }
+  section { margin-bottom: 2.5rem; }
+  section h2 {
+    font-size: 12px; letter-spacing: 0.5px; color: #999; font-weight: 600;
+    text-transform: uppercase; margin-bottom: 1rem; border-bottom: 1px solid #222;
+    padding-bottom: 8px;
+  }
+  label {
+    display: block; font-size: 12px; color: #999; margin-bottom: 6px; margin-top: 14px;
+    font-weight: 500;
+  }
+  input[type="text"], textarea, select {
+    width: 100%; padding: 10px 12px; background: #1a1a1a; border: 1px solid #222;
+    border-radius: 6px; color: #fff; font-size: 13px; font-family: inherit;
+  }
+  textarea { resize: vertical; min-height: 60px; }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  .category-block {
+    border: 1px solid #222; border-radius: 8px; padding: 1rem; margin-top: 1rem;
+    background: #111;
+  }
+  .item-row { display: flex; gap: 8px; margin-top: 8px; }
+  .item-row input { flex: 1; }
+  .small-btn {
+    background: #1a1a1a; color: #ccc; border: 1px solid #333; border-radius: 6px;
+    padding: 8px 12px; font-size: 12px; cursor: pointer; margin-top: 10px;
+  }
+  .small-btn:hover { background: #222; }
+  .remove-btn {
+    background: none; border: none; color: #e85d3a; font-size: 12px; cursor: pointer;
+    padding: 4px 8px;
+  }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+  .checkbox-row input { width: auto; }
+  .checkbox-row label { margin: 0; }
+  .generate-btn {
+    width: 100%; padding: 14px; background: #fff; color: #000; border: none;
+    border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 1rem;
+  }
+  .generate-btn:hover { background: #eee; }
+  #output {
+    display: none; margin-top: 2rem;
+  }
+  #output pre {
+    background: #111; border: 1px solid #222; border-radius: 8px; padding: 1rem;
+    font-size: 11px; overflow-x: auto; color: #9fd97a; max-height: 320px; overflow-y: auto;
+  }
+  .download-btn {
+    margin-top: 12px; padding: 10px 16px; background: #222; color: #fff;
+    border: 1px solid #333; border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  .pos-note {
+    font-size: 12px; color: #888; margin-bottom: 12px; line-height: 1.5;
+  }
+  .pos-status {
+    font-size: 12px; padding: 10px 12px; border-radius: 6px; margin-top: 12px;
+    display: none;
+  }
+  .pos-status.connected { background: #12321a; color: #7fd996; display: block; }
+</style>
+</head>
+<body>
+
+<h1>New Shop Setup</h1>
+<p class="sub">Fill this out once per shop. Submitting produces a shop-config.json file —
+drop it next to receptionist-engine.html and that shop's bot is live. No code involved.</p>
+
+<section>
+  <h2>Business Identity</h2>
+  <label>Legal / display name</label>
+  <input type="text" id="displayName" placeholder="e.g. RGV Vapor">
+
+  <label>Address</label>
+  <input type="text" id="address" placeholder="Street, city, state, zip">
+
+  <label>Hours (how it should read to customers)</label>
+  <input type="text" id="hoursDisplay" placeholder="e.g. Mon-Sat 10am-10pm, Sun 12pm-8pm">
+
+  <label>Tone</label>
+  <select id="tone">
+    <option value="casual">Casual</option>
+    <option value="friendly-professional">Friendly / professional</option>
+    <option value="formal">Formal</option>
+  </select>
+
+  <label>Greeting message</label>
+  <textarea id="greeting" placeholder="What the bot says first, e.g. Welcome to [Shop] — how can I help?"></textarea>
+</section>
+
+<section>
+  <h2>Age Verification</h2>
+  <div class="checkbox-row">
+    <input type="checkbox" id="requireAgeGate" checked>
+    <label for="requireAgeGate">Require age verification before showing product info</label>
+  </div>
+  <label>Minimum age</label>
+  <input type="text" id="minAge" value="21">
+  <label>Verification question shown to the customer</label>
+  <textarea id="verificationPrompt">Before we get started — you must be 21 or older to chat with us about our products. Are you 21 or older?</textarea>
+  <label>Message shown if they say no</label>
+  <textarea id="verificationFail">Sorry, we're unable to share product info if you're under 21. Feel free to stop by or call us with general questions!</textarea>
+</section>
+
+<section>
+  <h2>Point of Sale (Square)</h2>
+  <p class="pos-note">
+    Connecting here sends the shop owner to Square's real login/approval screen. This link
+    only works when server.js is actually running with real Square credentials set as
+    environment variables on the host (Railway's Variables tab) — see RAILWAY_DEPLOY.md.
+  </p>
+  <a href="/auth/square/connect" class="small-btn" style="text-decoration:none;display:inline-block;">
+    Connect Square Account -&gt;
+  </a>
+  <button class="small-btn" id="syncBtn" onclick="syncSquareInventory()" style="display:none;">
+    Sync inventory from Square
+  </button>
+  <div class="pos-status" id="posStatus"></div>
+</section>
+
+<section>
+  <h2>Product Categories</h2>
+  <p class="pos-note">If Square is connected, live items sync in automatically. Add categories
+    manually here for anything not coming from Square, or as a placeholder until it's connected.</p>
+  <div id="categoriesContainer"></div>
+  <button class="small-btn" onclick="addCategory()">+ Add category</button>
+</section>
+
+<button class="generate-btn" onclick="generateConfig()">Generate shop-config.json</button>
+
+<div id="output">
+  <h2 style="font-size:12px;color:#999;margin-bottom:8px;">Generated config</h2>
+  <pre id="jsonOutput"></pre>
+  <button class="download-btn" onclick="downloadConfig()">Download shop-config.json</button>
+</div>
+
+<script>
+let categoryCount = 0;
+
+// This form only builds the identity/compliance/category fields client-side.
+// Square connection itself happens for real via the "Connect Square Account" link
+// above, which hits the running backend (server.js) and writes directly into
+// that shop's config on the server — not through this in-browser state. This
+// default just keeps a new shop's generated config shape valid until it's connected.
+const posConnection = {
+  provider: "square",
+  connected: false,
+  location_id: null,
+  access_token: null,
+  last_synced: null,
+  mock_catalog: []
+};
+
+// Check the LIVE connection status (the real server-side one, not the block above)
+// so the form reflects reality instead of always looking disconnected after a fresh load.
+async function checkSquareStatus() {
+  const statusEl = document.getElementById('posStatus');
+  const syncBtn = document.getElementById('syncBtn');
+  try {
+    const resp = await fetch('/shop-config.json');
+    const config = await resp.json();
+    const pos = config.pos_connection || {};
+    if (pos.connected) {
+      statusEl.className = 'pos-status connected';
+      statusEl.style.display = 'block';
+      statusEl.textContent = pos.last_synced
+        ? `Square connected — last synced ${new Date(pos.last_synced).toLocaleString()}`
+        : 'Square connected — not synced yet';
+      syncBtn.style.display = 'inline-block';
+    } else {
+      syncBtn.style.display = 'none';
+    }
+  } catch (err) {
+    // Backend might not be running yet, or this copy is open outside the server —
+    // fine, the form still works standalone, just without live status.
+  }
+}
+
+async function syncSquareInventory() {
+  const syncBtn = document.getElementById('syncBtn');
+  const statusEl = document.getElementById('posStatus');
+  syncBtn.disabled = true;
+  syncBtn.textContent = 'Syncing...';
+  try {
+    const resp = await fetch('/api/square/sync', { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) {
+      statusEl.className = 'pos-status connected';
+      statusEl.style.background = '#3a1414';
+      statusEl.style.color = '#f19a9a';
+      statusEl.style.display = 'block';
+      statusEl.textContent = `Sync failed: ${data.error || 'unknown error'}`;
+    } else {
+      statusEl.className = 'pos-status connected';
+      statusEl.style.background = '';
+      statusEl.style.color = '';
+      statusEl.style.display = 'block';
+      statusEl.textContent = `Synced ${data.synced} item(s) from Square just now.`;
+    }
+  } catch (err) {
+    statusEl.style.display = 'block';
+    statusEl.textContent = 'Sync failed — could not reach the server.';
+  } finally {
+    syncBtn.disabled = false;
+    syncBtn.textContent = 'Sync inventory from Square';
+  }
+}
+
+checkSquareStatus();
+
+function addCategory() {
+  categoryCount++;
+  const id = categoryCount;
+  const container = document.getElementById('categoriesContainer');
+  const block = document.createElement('div');
+  block.className = 'category-block';
+  block.id = `category-${id}`;
+  block.innerHTML = `
+    <div class="row">
+      <div>
+        <label>Category label (shown to customers)</label>
+        <input type="text" class="cat-label" placeholder="e.g. Vapes &amp; E-Liquids">
+      </div>
+      <div>
+        <label>Keywords that trigger it (comma separated)</label>
+        <input type="text" class="cat-keywords" placeholder="e.g. vape, e-liquid, disposable">
+      </div>
+    </div>
+    <div class="items-container"></div>
+    <button class="small-btn" onclick="addItem(${id})">+ Add item</button>
+    <button class="remove-btn" onclick="document.getElementById('category-${id}').remove()">Remove category</button>
+  `;
+  container.appendChild(block);
+  addItem(id);
+}
+
+function addItem(categoryId) {
+  const itemsContainer = document.querySelector(`#category-${categoryId} .items-container`);
+  const row = document.createElement('div');
+  row.className = 'item-row';
+  row.innerHTML = `
+    <input type="text" class="item-name" placeholder="Item name">
+    <input type="text" class="item-price" placeholder="Price">
+    <input type="text" class="item-details" placeholder="Details (optional)">
+    <button class="remove-btn" onclick="this.parentElement.remove()">x</button>
+  `;
+  itemsContainer.appendChild(row);
+}
+
+function slugify(str) {
+  return str.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+}
+
+function generateConfig() {
+  const displayName = document.getElementById('displayName').value.trim();
+
+  const categories = [...document.querySelectorAll('.category-block')].map(block => {
+    const label = block.querySelector('.cat-label').value.trim();
+    const keywords = block.querySelector('.cat-keywords').value
+      .split(',').map(k => k.trim()).filter(Boolean);
+    const items = [...block.querySelectorAll('.item-row')].map(row => ({
+      name: row.querySelector('.item-name').value.trim(),
+      price: row.querySelector('.item-price').value.trim(),
+      details: row.querySelector('.item-details').value.trim()
+    })).filter(item => item.name);
+
+    return { key: slugify(label || 'category'), label, keywords, items };
+  }).filter(cat => cat.label);
+
+  const config = {
+    shop_id: slugify(displayName || 'new-shop'),
+    identity: {
+      legal_name: displayName,
+      display_name: displayName,
+      address: document.getElementById('address').value.trim(),
+      phone: "",
+      timezone: "America/Chicago",
+      hours_display: document.getElementById('hoursDisplay').value.trim(),
+      tone: document.getElementById('tone').value,
+      greeting_message: document.getElementById('greeting').value.trim()
+    },
+    compliance: {
+      require_age_verification: document.getElementById('requireAgeGate').checked,
+      min_age: parseInt(document.getElementById('minAge').value, 10) || 21,
+      verification_prompt: document.getElementById('verificationPrompt').value.trim(),
+      verification_fail_message: document.getElementById('verificationFail').value.trim()
+    },
+    pos_connection: posConnection,
+    products: { categories },
+    quick_questions: [
+      "What are your store hours?",
+      "Where are you located?",
+      "What products do you carry?"
+    ]
+  };
+
+  const json = JSON.stringify(config, null, 2);
+  document.getElementById('jsonOutput').textContent = json;
+  document.getElementById('output').style.display = 'block';
+  document.getElementById('output').scrollIntoView({ behavior: 'smooth' });
+}
+
+function downloadConfig() {
+  const json = document.getElementById('jsonOutput').textContent;
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'shop-config.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// Start with one category so the form isn't empty
+addCategory();
+</script>
+
+</body>
+</html>
