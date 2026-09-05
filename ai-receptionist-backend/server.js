@@ -1,34 +1,34 @@
 /**
- * AI Receptionist backend â€” Square OAuth + Catalog sync.
+ * AI Receptionist backend — Square OAuth + Catalog sync.
  *
  * WHAT THIS DOES
- *   1. GET  /auth/square/connect   â€” sends the shop owner to Square to log in and approve access.
- *   2. GET  /auth/square/callback  â€” Square redirects back here with a one-time code; this
+ *   1. GET  /auth/square/connect   — sends the shop owner to Square to log in and approve access.
+ *   2. GET  /auth/square/callback  — Square redirects back here with a one-time code; this
  *                                    exchanges it for a real access token and stores it.
- *   3. POST /api/square/sync       â€” pulls real items from Square's Catalog API and writes
+ *   3. POST /api/square/sync       — pulls real items from Square's Catalog API and writes
  *                                    them into shop-config.json, where the chatbot engine
  *                                    already knows how to read them (same field it used for
- *                                    the sample/mock data â€” this just fills it with real items).
+ *                                    the sample/mock data — this just fills it with real items).
  *
  * SETUP ON RAILWAY  (see RAILWAY_DEPLOY.md for the full click-by-click version)
  *   1. railway init in this folder (or connect the Railway dashboard to wherever this lives)
  *   2. Attach a Volume so shop-config.json survives redeploys, and set CONFIG_PATH to a path
- *      inside it (e.g. CONFIG_PATH=/data/shop-config.json) â€” Railway env var, not this file.
- *   3. In Railway's Variables tab (not a file â€” this is their equivalent of Replit Secrets), add:
- *        SQUARE_CLIENT_ID       â€” from your Square Developer app
- *        SQUARE_CLIENT_SECRET   â€” from your Square Developer app (never put this in a file)
- *        SQUARE_ENVIRONMENT     â€” "sandbox" while testing, "production" when live
- *        SQUARE_REDIRECT_URI    â€” https://<your-railway-domain>/auth/square/callback
+ *      inside it (e.g. CONFIG_PATH=/data/shop-config.json) — Railway env var, not this file.
+ *   3. In Railway's Variables tab (not a file — this is their equivalent of Replit Secrets), add:
+ *        SQUARE_CLIENT_ID       — from your Square Developer app
+ *        SQUARE_CLIENT_SECRET   — from your Square Developer app (never put this in a file)
+ *        SQUARE_ENVIRONMENT     — "sandbox" while testing, "production" when live
+ *        SQUARE_REDIRECT_URI    — https://<your-railway-domain>/auth/square/callback
  *                                  (must exactly match what you register in the Square
  *                                  Developer Console's OAuth settings)
- *        CONFIG_PATH            â€” /data/shop-config.json (matching the Volume mount path)
- *   4. railway up (or push â€” Railway redeploys automatically on connected repos)
+ *        CONFIG_PATH            — /data/shop-config.json (matching the Volume mount path)
+ *   4. railway up (or push — Railway redeploys automatically on connected repos)
  *   5. Open the Railway-issued URL, go to onboarding-form.html, click "Connect Real Square Account".
  *
  * TESTING WITHOUT REAL CREDENTIALS
  *   SQUARE_OAUTH_BASE_OVERRIDE and SQUARE_API_BASE_OVERRIDE let you point this whole flow at
  *   a fake local Square for testing (see how this was verified before delivery). Leave them
- *   unset for real use â€” they default to Square's real sandbox/production URLs.
+ *   unset for real use — they default to Square's real sandbox/production URLs.
  */
 
 require('dotenv').config();
@@ -42,14 +42,14 @@ const PORT = process.env.PORT || 3000;
 const DEFAULT_CONFIG_TEMPLATE = path.join(__dirname, 'shop-config.json');
 const CONFIG_PATH = process.env.CONFIG_PATH || DEFAULT_CONFIG_TEMPLATE;
 
-// A Railway Volume starts out empty â€” if CONFIG_PATH points somewhere other than the
+// A Railway Volume starts out empty — if CONFIG_PATH points somewhere other than the
 // bundled default (i.e. we're pointed at a mounted volume) and nothing's there yet,
 // seed it from the template that ships with the code so the app has something to serve
 // on first boot instead of crashing.
 if (CONFIG_PATH !== DEFAULT_CONFIG_TEMPLATE && !fs.existsSync(CONFIG_PATH)) {
   fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
   fs.copyFileSync(DEFAULT_CONFIG_TEMPLATE, CONFIG_PATH);
-  console.log(`No config found at ${CONFIG_PATH} â€” seeded it from the bundled template.`);
+  console.log(`No config found at ${CONFIG_PATH} — seeded it from the bundled template.`);
 }
 
 const SQUARE_ENV = process.env.SQUARE_ENVIRONMENT || 'sandbox';
@@ -75,9 +75,46 @@ function writeConfig(config) {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
 }
 
+// Square categories are a separate object type from items, so a second call is
+// needed to turn the category IDs on each item into human-readable names. If this
+// fails for any reason, we fall back to grouping everything as "Uncategorized"
+// rather than failing the whole sync over it.
+async function fetchCategoryMap(accessToken) {
+  const map = {};
+  try {
+    const resp = await fetch(`${SQUARE_API_BASE}/v2/catalog/list?types=CATEGORY`, {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Square-Version': SQUARE_VERSION
+      }
+    });
+    const data = await resp.json();
+    (data.objects || []).forEach(obj => {
+      if (obj.type === 'CATEGORY' && obj.category_data) {
+        map[obj.id] = obj.category_data.name;
+      }
+    });
+  } catch (err) {
+    console.error('Could not fetch Square categories (continuing without them):', err);
+  }
+  return map;
+}
+
+// Square has shipped a couple of different shapes for "which category is this
+// item in" over time – reporting_category (newest), categories[] (current),
+// and category_id (legacy, singular). Check them in that order.
+function categoryNameForItem(itemData, categoryMap) {
+  const categoryId =
+    (itemData.reporting_category && itemData.reporting_category.id) ||
+    (itemData.categories && itemData.categories[0] && itemData.categories[0].id) ||
+    itemData.category_id ||
+    null;
+  return (categoryId && categoryMap[categoryId]) || 'Uncategorized';
+}
+
 app.use(express.json());
 
-// Serve the LIVE config â€” which may live on a mounted Railway Volume at CONFIG_PATH â€”
+// Serve the LIVE config — which may live on a mounted Railway Volume at CONFIG_PATH —
 // instead of falling through to the static copy bundled with the code. Must be
 // registered before express.static, or express.static would win and always hand out
 // the unchanging bundled file instead of the one OAuth/sync actually update.
@@ -119,7 +156,7 @@ app.get('/auth/square/callback', async (req, res) => {
   }
   if (!code || !state || !pendingStates.has(state)) {
     return res.status(400).send(
-      'Missing or invalid state â€” this request did not start from our own "Connect Square" link.'
+      'Missing or invalid state — this request did not start from our own "Connect Square" link.'
     );
   }
   pendingStates.delete(state);
@@ -174,7 +211,7 @@ app.get('/auth/square/callback', async (req, res) => {
     `);
   } catch (err) {
     console.error(err);
-    res.status(500).send('Something went wrong exchanging the token â€” check server logs.');
+    res.status(500).send('Something went wrong exchanging the token — check server logs.');
   }
 });
 
@@ -189,6 +226,10 @@ app.post('/api/square/sync', async (req, res) => {
   }
 
   try {
+    // Fetched up front so every item below can be tagged with its category name
+    // in one pass, instead of looking it up per item.
+    const categoryMap = await fetchCategoryMap(pos.access_token);
+
     const resp = await fetch(`${SQUARE_API_BASE}/v2/catalog/search-catalog-items`, {
       method: 'POST',
       headers: {
@@ -203,29 +244,42 @@ app.post('/api/square/sync', async (req, res) => {
       return res.status(502).json({ error: 'Square catalog request failed', details: data.errors || data });
     }
 
-    const items = (data.items || []).flatMap(item => {
+    // Same flat list as before (mock_catalog) for anything that still reads it,
+    // plus a by-category breakdown (mock_catalog_by_category) so the chatbot can
+    // answer category-specific questions ("do you have vapes?") instead of only
+    // ever showing everything synced from Square at once.
+    const flatItems = [];
+    const itemsByCategory = {};
+
+    (data.items || []).forEach(item => {
       const itemData = item.item_data || {};
       const variations = itemData.variations || [];
-      if (variations.length === 0) return [];
-      return variations.map(v => {
+      if (variations.length === 0) return;
+
+      const categoryName = categoryNameForItem(itemData, categoryMap);
+
+      variations.forEach(v => {
         const vd = v.item_variation_data || {};
         const amount = vd.price_money ? (vd.price_money.amount / 100).toFixed(2) : null;
-        return {
+        const entry = {
           name: variations.length > 1 ? `${itemData.name} - ${vd.name}` : itemData.name,
           price: amount ? `$${amount}` : 'Call for price',
           details: 'Synced from Square'
         };
+        flatItems.push(entry);
+        (itemsByCategory[categoryName] = itemsByCategory[categoryName] || []).push(entry);
       });
     });
 
-    config.pos_connection.mock_catalog = items;
+    config.pos_connection.mock_catalog = flatItems;
+    config.pos_connection.mock_catalog_by_category = itemsByCategory;
     config.pos_connection.last_synced = new Date().toISOString();
     writeConfig(config);
 
-    res.json({ synced: items.length, items });
+    res.json({ synced: flatItems.length, categories: Object.keys(itemsByCategory), items: flatItems });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Sync failed â€” check server logs.' });
+    res.status(500).json({ error: 'Sync failed — check server logs.' });
   }
 });
 
