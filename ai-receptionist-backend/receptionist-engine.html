@@ -229,11 +229,30 @@ function respondToQuery(query) {
   const identity = shopConfig.identity;
   const categories = [...((shopConfig.products && shopConfig.products.categories) || [])];
 
-  // If Square is connected, its synced items are just another category to the
+  // If Square is connected, its synced items are just more categories to the
   // engine — this is the seam where a real Catalog API pull replaces mock_catalog
   // with live items, without anything else here changing.
   const pos = shopConfig.pos_connection;
   if (pos && pos.connected && pos.mock_catalog && pos.mock_catalog.length) {
+    // One category per Square category (e.g. "Vapes", "Concentrates"), so a
+    // question like "do you have vapes?" only shows vapes instead of everything
+    // synced from Square. Pushed before the catch-all below so a specific match
+    // wins (the matching loop stops at the first hit).
+    const byCategory = pos.mock_catalog_by_category || {};
+    Object.keys(byCategory).forEach(categoryName => {
+      if (categoryName === 'Uncategorized') return; // nothing useful to match on
+      const words = categoryName.toLowerCase().split(/\s+/).filter(Boolean);
+      categories.push({
+        key: 'square_' + categoryName.toLowerCase().replace(/\s+/g, '_'),
+        label: `${categoryName} (synced from Square)`,
+        keywords: [categoryName.toLowerCase(), ...words],
+        items: byCategory[categoryName]
+      });
+    });
+
+    // Catch-all for generic "what's in stock" style questions across everything
+    // synced. Also the only bucket used for shops synced before this feature
+    // shipped, since mock_catalog_by_category won't exist on their config yet.
     categories.push({
       key: 'square_synced',
       label: 'Live Inventory (synced from Square)',
