@@ -1,37 +1,44 @@
 /**
- * AI Receptionist backend — Square OAuth + Catalog sync.
+ * AI Receptionist backend — Square OAuth + Catalog sync + age-gated chat.
  *
  * WHAT THIS DOES
  *   1. GET  /auth/square/connect   — sends the shop owner to Square to log in and approve access.
  *   2. GET  /auth/square/callback  — Square redirects back here with a one-time code; this
  *                                    exchanges it for a real access token and stores it ENCRYPTED.
  *   3. POST /api/square/sync       — pulls real items from Square's Catalog API and writes
- *                                    them into shop-config.json, where the chatbot engine
- *                                    already knows how to read them (same field it used for
- *                                    the sample/mock data — this just fills it with real items).
+ *                                    them into shop-config.json.
+ *   4. GET  /api/shop-info         — PUBLIC. Identity + the age-verification prompt only.
+ *                                    No products, no POS data — safe for anyone to fetch.
+ *   5. POST /api/verify-age        — logs the attempt (pass or fail) to an audit file, and on
+ *                                    a pass issues a signed, time-limited token.
+ *   6. POST /api/chat              — requires a valid token from step 5 (unless age verification
+ *                                    is turned off for this shop). This is now the ONLY way the
+ *                                    product catalog reaches a browser — it never ships in a
+ *                                    page load or a raw config fetch, so there's nothing for an
+ *                                    unverified visitor to read out of dev tools.
  *
- * SETUP ON RAILWAY  (see RAILWAY_DEPLOY.md for the full click-by-click version)
+ * SETUP ON RAILWAY  (see RAILWAY_DEPLOY.md and AGE-VERIFICATION-SETUP.md for full walkthroughs)
  *   1. railway init in this folder (or connect the Railway dashboard to wherever this lives)
  *   2. Attach a Volume so shop-config.json survives redeploys, and set CONFIG_PATH to a path
  *      inside it (e.g. CONFIG_PATH=/data/shop-config.json) — Railway env var, not this file.
- *   3. Generate an encryption key:
+ *      The age-verification audit log lives in the same folder, so it survives redeploys too.
+ *   3. Generate an encryption key and an age-token secret (two separate values):
  *        node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
- *   4. In Railway's Variables tab (not a file — this is their equivalent of Replit Secrets), add:
+ *   4. In Railway's Variables tab, add:
  *        SQUARE_CLIENT_ID       — from your Square Developer app
  *        SQUARE_CLIENT_SECRET   — from your Square Developer app (never put this in a file)
  *        SQUARE_ENVIRONMENT     — "sandbox" while testing, "production" when live
  *        SQUARE_REDIRECT_URI    — https://<your-railway-domain>/auth/square/callback
- *                                  (must exactly match what you register in the Square
- *                                  Developer Console's OAuth settings)
  *        CONFIG_PATH            — /data/shop-config.json (matching the Volume mount path)
  *        ENCRYPTION_KEY         — 64-character hex string (generated above)
+ *        AGE_TOKEN_SECRET       — a separate random string (generated above) — falls back to
+ *                                 reusing ENCRYPTION_KEY if omitted, but a dedicated value is better
+ *        AGE_TOKEN_TTL_MINUTES  — optional, how long a verification lasts (default: 120)
  *   5. railway up (or push — Railway redeploys automatically on connected repos)
- *   6. Open the Railway-issued URL, go to onboarding-form.html, click "Connect Real Square Account".
  *
  * TESTING WITHOUT REAL CREDENTIALS
  *   SQUARE_OAUTH_BASE_OVERRIDE and SQUARE_API_BASE_OVERRIDE let you point this whole flow at
- *   a fake local Square for testing (see how this was verified before delivery). Leave them
- *   unset for real use — they default to Square's real sandbox/production URLs.
+ *   a fake local Square for testing. Leave them unset for real use.
  */
 
 require('dotenv').config();
@@ -40,6 +47,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { encrypt, decrypt } = require('./crypto-utils');
+const { signToken, verifyToken, logVerificationAttempt } = require('./age-verification');
+const { generateChatResponse } = require('./chat-engine');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -117,27 +126,105 @@ function categoryNameForItem(itemData, categoryMap) {
 }
 
 app.use(express.json());
+// The Railway proxy sits in front of this app — trust its X-Forwarded-For header
+// so req.ip reflects the visitor's real address instead of Railway's internal IP.
+// This matters for the age-verification audit log below.
+app.set('trust proxy', true);
 
-// Serve the LIVE config — which may live on a mounted Railway Volume at CONFIG_PATH —
-// instead of falling through to the static copy bundled with the code. Must be
-// registered before express.static, or express.static would win and always hand out
-// the unchanging bundled file instead of the one OAuth/sync actually update.
+// PUBLIC, INTENTIONALLY MINIMAL. Used by the onboarding form to show connection
+// status. Used to also serve the full config (including products and, briefly,
+// decrypted tokens) to any visitor — that's now gone. Product data only ever
+// reaches a browser through POST /api/chat, after age verification.
 app.get('/shop-config.json', (req, res) => {
   const config = readConfig();
-  // Decrypt tokens before sending to client (they should never appear unencrypted on wire)
-  if (config.pos_connection && config.pos_connection.access_token_encrypted) {
-    config.pos_connection.access_token = decrypt(config.pos_connection.access_token_encrypted);
-    // Remove the encrypted version from response — client only sees decrypted
-    delete config.pos_connection.access_token_encrypted;
-  }
-  if (config.pos_connection && config.pos_connection.refresh_token_encrypted) {
-    config.pos_connection.refresh_token = decrypt(config.pos_connection.refresh_token_encrypted);
-    delete config.pos_connection.refresh_token_encrypted;
-  }
-  res.type('application/json').send(JSON.stringify(config, null, 2));
+  const pos = config.pos_connection || {};
+  res.json({
+    pos_connection: {
+      provider: pos.provider || null,
+      connected: !!pos.connected,
+      last_synced: pos.last_synced || null
+    }
+  });
 });
 
 app.use(express.static(__dirname));
+
+// ---------------------------------------------------------------------------
+// PUBLIC. Identity + the age-verification prompt text — nothing a shop would
+// consider sensitive, and nothing that requires being 21+ to see (a shop's
+// name, hours, and "are you 21?" question aren't gated content anywhere).
+// ---------------------------------------------------------------------------
+app.get('/api/shop-info', (req, res) => {
+  const config = readConfig();
+  res.json({
+    identity: config.identity,
+    compliance: {
+      require_age_verification: !!config.compliance.require_age_verification,
+      verification_prompt: config.compliance.verification_prompt,
+      verification_fail_message: config.compliance.verification_fail_message,
+      min_age: config.compliance.min_age
+    },
+    quick_questions: config.quick_questions || []
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Every verification attempt is logged — pass or fail — with a timestamp and
+// the visitor's IP, before anything else happens. A "yes" issues a signed
+// token; a "no" gets the shop's configured decline message and nothing else.
+// ---------------------------------------------------------------------------
+app.post('/api/verify-age', (req, res) => {
+  const config = readConfig();
+  const confirmed = req.body && req.body.confirmed === true;
+
+  logVerificationAttempt(CONFIG_PATH, {
+    timestamp: new Date().toISOString(),
+    shop_id: config.shop_id,
+    ip: req.ip,
+    user_agent: req.headers['user-agent'] || 'unknown',
+    result: confirmed ? 'confirmed' : 'denied'
+  });
+
+  if (!confirmed) {
+    return res.json({
+      verified: false,
+      message: config.compliance.verification_fail_message
+    });
+  }
+
+  const ttlMinutes = parseInt(process.env.AGE_TOKEN_TTL_MINUTES, 10) || 120;
+  const token = signToken({
+    verified: true,
+    shop_id: config.shop_id,
+    exp: Date.now() + ttlMinutes * 60 * 1000
+  });
+
+  res.json({ verified: true, token });
+});
+
+// ---------------------------------------------------------------------------
+// The ONLY route that returns product/pricing data. Requires a valid token
+// from /api/verify-age above whenever the shop has age verification turned
+// on — there is no other path to this data from the browser.
+// ---------------------------------------------------------------------------
+app.post('/api/chat', (req, res) => {
+  const config = readConfig();
+  const { message, token } = req.body || {};
+
+  if (config.compliance.require_age_verification) {
+    const payload = verifyToken(token);
+    if (!payload || !payload.verified || payload.shop_id !== config.shop_id) {
+      return res.status(403).json({ error: 'age_verification_required' });
+    }
+  }
+
+  if (!message || typeof message !== 'string' || !message.trim()) {
+    return res.status(400).json({ error: 'message is required' });
+  }
+
+  const response = generateChatResponse(message, config);
+  res.json({ response });
+});
 
 // ---------------------------------------------------------------------------
 // Step 1: shop owner clicks "Connect Square" -> here -> redirected to Square
@@ -312,5 +399,8 @@ app.listen(PORT, () => {
   console.log(`Config path: ${CONFIG_PATH}`);
   if (!process.env.ENCRYPTION_KEY) {
     console.warn('⚠️  ENCRYPTION_KEY not set — using development default (not secure for production)');
+  }
+  if (!process.env.AGE_TOKEN_SECRET) {
+    console.warn('⚠️  AGE_TOKEN_SECRET not set — falling back to ENCRYPTION_KEY (or an insecure default if that\'s missing too)');
   }
 });
