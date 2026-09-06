@@ -4,7 +4,7 @@
  * WHAT THIS DOES
  *   1. GET  /auth/square/connect   — sends the shop owner to Square to log in and approve access.
  *   2. GET  /auth/square/callback  — Square redirects back here with a one-time code; this
- *                                    exchanges it for a real access token and stores it.
+ *                                    exchanges it for a real access token and stores it ENCRYPTED.
  *   3. POST /api/square/sync       — pulls real items from Square's Catalog API and writes
  *                                    them into shop-config.json, where the chatbot engine
  *                                    already knows how to read them (same field it used for
@@ -14,7 +14,9 @@
  *   1. railway init in this folder (or connect the Railway dashboard to wherever this lives)
  *   2. Attach a Volume so shop-config.json survives redeploys, and set CONFIG_PATH to a path
  *      inside it (e.g. CONFIG_PATH=/data/shop-config.json) — Railway env var, not this file.
- *   3. In Railway's Variables tab (not a file — this is their equivalent of Replit Secrets), add:
+ *   3. Generate an encryption key:
+ *        node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+ *   4. In Railway's Variables tab (not a file — this is their equivalent of Replit Secrets), add:
  *        SQUARE_CLIENT_ID       — from your Square Developer app
  *        SQUARE_CLIENT_SECRET   — from your Square Developer app (never put this in a file)
  *        SQUARE_ENVIRONMENT     — "sandbox" while testing, "production" when live
@@ -22,8 +24,9 @@
  *                                  (must exactly match what you register in the Square
  *                                  Developer Console's OAuth settings)
  *        CONFIG_PATH            — /data/shop-config.json (matching the Volume mount path)
- *   4. railway up (or push — Railway redeploys automatically on connected repos)
- *   5. Open the Railway-issued URL, go to onboarding-form.html, click "Connect Real Square Account".
+ *        ENCRYPTION_KEY         — 64-character hex string (generated above)
+ *   5. railway up (or push — Railway redeploys automatically on connected repos)
+ *   6. Open the Railway-issued URL, go to onboarding-form.html, click "Connect Real Square Account".
  *
  * TESTING WITHOUT REAL CREDENTIALS
  *   SQUARE_OAUTH_BASE_OVERRIDE and SQUARE_API_BASE_OVERRIDE let you point this whole flow at
@@ -36,6 +39,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { encrypt, decrypt } = require('./crypto-utils');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -119,7 +123,18 @@ app.use(express.json());
 // registered before express.static, or express.static would win and always hand out
 // the unchanging bundled file instead of the one OAuth/sync actually update.
 app.get('/shop-config.json', (req, res) => {
-  res.type('application/json').send(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  const config = readConfig();
+  // Decrypt tokens before sending to client (they should never appear unencrypted on wire)
+  if (config.pos_connection && config.pos_connection.access_token_encrypted) {
+    config.pos_connection.access_token = decrypt(config.pos_connection.access_token_encrypted);
+    // Remove the encrypted version from response — client only sees decrypted
+    delete config.pos_connection.access_token_encrypted;
+  }
+  if (config.pos_connection && config.pos_connection.refresh_token_encrypted) {
+    config.pos_connection.refresh_token = decrypt(config.pos_connection.refresh_token_encrypted);
+    delete config.pos_connection.refresh_token_encrypted;
+  }
+  res.type('application/json').send(JSON.stringify(config, null, 2));
 });
 
 app.use(express.static(__dirname));
@@ -193,8 +208,9 @@ app.get('/auth/square/callback', async (req, res) => {
       provider: 'square',
       connected: true,
       location_id: firstLocation.id || null,
-      access_token: tokenData.access_token,
-      refresh_token: tokenData.refresh_token || null,
+      // ENCRYPT before storing
+      access_token_encrypted: encrypt(tokenData.access_token),
+      refresh_token_encrypted: tokenData.refresh_token ? encrypt(tokenData.refresh_token) : null,
       expires_at: tokenData.expires_at || null,
       last_synced: null,
       // Keep whatever sample items were there until the first real /api/square/sync call.
@@ -204,7 +220,7 @@ app.get('/auth/square/callback', async (req, res) => {
 
     res.send(`
       <body style="font-family:sans-serif;background:#0a0a0a;color:#fff;padding:3rem;text-align:center;">
-        <h2>Square connected</h2>
+        <h2>✅ Square connected & tokens encrypted</h2>
         <p>Location: ${firstLocation.name || firstLocation.id || 'unknown'}</p>
         <p>Next: call POST /api/square/sync (or hit "Sync inventory" in the onboarding form) to pull real items.</p>
       </body>
@@ -221,19 +237,26 @@ app.get('/auth/square/callback', async (req, res) => {
 app.post('/api/square/sync', async (req, res) => {
   const config = readConfig();
   const pos = config.pos_connection;
-  if (!pos || !pos.connected || !pos.access_token) {
+  
+  if (!pos || !pos.connected) {
     return res.status(400).json({ error: 'Square is not connected for this shop yet.' });
+  }
+
+  // DECRYPT before using
+  const accessToken = decrypt(pos.access_token_encrypted);
+  if (!accessToken) {
+    return res.status(400).json({ error: 'Could not decrypt Square access token. Token may be corrupted or key changed.' });
   }
 
   try {
     // Fetched up front so every item below can be tagged with its category name
     // in one pass, instead of looking it up per item.
-    const categoryMap = await fetchCategoryMap(pos.access_token);
+    const categoryMap = await fetchCategoryMap(accessToken);
 
     const resp = await fetch(`${SQUARE_API_BASE}/v2/catalog/search-catalog-items`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${pos.access_token}`,
+        'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
         'Square-Version': SQUARE_VERSION
       },
@@ -286,4 +309,8 @@ app.post('/api/square/sync', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Receptionist backend running on port ${PORT}`);
   console.log(`Square environment: ${SQUARE_ENV} (${SQUARE_OAUTH_BASE})`);
+  console.log(`Config path: ${CONFIG_PATH}`);
+  if (!process.env.ENCRYPTION_KEY) {
+    console.warn('⚠️  ENCRYPTION_KEY not set — using development default (not secure for production)');
+  }
 });
