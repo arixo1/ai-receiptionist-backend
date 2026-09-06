@@ -80,50 +80,52 @@
 
 <script>
 /* ============================================================================
-   ENGINE LOGIC — this whole script is shop-agnostic. It never references
-   "Smoking Valley" or any specific product by name. Everything it needs
-   comes from shopConfig, loaded below. To run this for a different shop,
-   you swap shop-config.json — you never edit anything past this comment.
+   ENGINE LOGIC — shop-agnostic, same as before. The one architectural change:
+   this file no longer fetches the full shop-config.json (which used to include
+   the entire product catalog, visible in the page before anyone answered the
+   age question). It now only knows a shop's name, hours, and the verification
+   prompt text — GET /api/shop-info. Everything about products goes through
+   POST /api/chat, which the server refuses to answer unless a valid,
+   server-issued age-verification token is attached. The catalog itself never
+   reaches this page until that check has passed on the server.
    ============================================================================ */
 
-// Minimal built-in fallback so the file still demos something if
-// shop-config.json can't be fetched (e.g. opened as a local file with no server).
-const FALLBACK_CONFIG = {
+// Minimal built-in fallback so the file still shows something if the backend
+// can't be reached at all (e.g. opened as a local file with no server).
+const FALLBACK_INFO = {
   identity: {
     display_name: "Demo Shop",
     address: "123 Example St",
     hours_display: "Open daily 9am - 9pm",
-    greeting_message: "Hi! This is placeholder data — shop-config.json didn't load."
+    greeting_message: "Hi! This is placeholder data — the backend didn't respond."
   },
   compliance: { require_age_verification: false },
-  products: { categories: [] },
   quick_questions: ["What are your hours?", "Where are you located?"]
 };
 
-let shopConfig = null;
+let shopInfo = null;
 let awaitingAgeVerification = false;
+let ageToken = null; // held in memory only — cleared on refresh, same as before
 
 async function loadConfig() {
   try {
-    const res = await fetch('./shop-config.json', { cache: 'no-store' });
+    const res = await fetch('./api/shop-info', { cache: 'no-store' });
     if (!res.ok) throw new Error('fetch failed');
-    shopConfig = await res.json();
+    shopInfo = await res.json();
   } catch (err) {
     document.getElementById('configWarning').style.display = 'block';
-    shopConfig = FALLBACK_CONFIG;
+    shopInfo = FALLBACK_INFO;
   }
   startEngine();
 }
 
 function startEngine() {
-  const pos = shopConfig.pos_connection;
-  const syncedTag = (pos && pos.connected) ? ' • 🔄 Square synced (sample)' : '';
   document.getElementById('headerTitle').textContent =
-    (shopConfig.identity.display_name || 'Shop') + ' • Online now' + syncedTag;
+    (shopInfo.identity.display_name || 'Shop') + ' • Online now';
 
-  if (shopConfig.compliance && shopConfig.compliance.require_age_verification) {
+  if (shopInfo.compliance && shopInfo.compliance.require_age_verification) {
     awaitingAgeVerification = true;
-    addMessage(shopConfig.compliance.verification_prompt, 'bot');
+    addMessage(shopInfo.compliance.verification_prompt, 'bot');
     renderYesNo();
   } else {
     greetAndStart();
@@ -131,7 +133,7 @@ function startEngine() {
 }
 
 function greetAndStart() {
-  addMessage(shopConfig.identity.greeting_message, 'bot');
+  addMessage(shopInfo.identity.greeting_message, 'bot');
   renderQuickQuestions(null);
 }
 
@@ -154,14 +156,31 @@ function renderYesNo() {
   chatArea.scrollTop = chatArea.scrollHeight;
 }
 
-function answerAgeGate(isOfAge) {
+// This now calls the server — the actual pass/fail decision, the audit log
+// entry, and the token that unlocks /api/chat are all issued server-side.
+// The browser can't forge a "yes" for itself; it can only ask the server for one.
+async function answerAgeGate(isOfAge) {
   document.getElementById('ageGateButtons').remove();
   addMessage(isOfAge ? "Yes, I'm 21 or older" : "No", 'user');
   awaitingAgeVerification = false;
-  if (isOfAge) {
-    greetAndStart();
-  } else {
-    addMessage(shopConfig.compliance.verification_fail_message, 'bot');
+
+  try {
+    const res = await fetch('./api/verify-age', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirmed: isOfAge })
+    });
+    const data = await res.json();
+
+    if (data.verified) {
+      ageToken = data.token;
+      greetAndStart();
+    } else {
+      addMessage(data.message || shopInfo.compliance.verification_fail_message, 'bot');
+      document.getElementById('chatInput').disabled = true;
+    }
+  } catch (err) {
+    addMessage('Something went wrong verifying your age — please refresh and try again.', 'bot');
     document.getElementById('chatInput').disabled = true;
   }
 }
@@ -185,6 +204,10 @@ function handleQuickQuestion(question) {
   setTimeout(() => respondToQuery(question), 250);
 }
 
+// Sends the message to the server and renders whatever comes back. This is
+// now the ONLY place product/pricing info can enter the page — it lives on
+// the server and is returned per-question, never loaded up front.
+
 function addMessage(text, sender) {
   const chatArea = document.getElementById('chatArea');
   const msg = document.createElement('div');
@@ -199,7 +222,7 @@ function addMessage(text, sender) {
 
 function renderQuickQuestions(excludeQuestion) {
   const chatArea = document.getElementById('chatArea');
-  const pool = (shopConfig.quick_questions || []).filter(q => q !== excludeQuestion);
+  const pool = (shopInfo.quick_questions || []).filter(q => q !== excludeQuestion);
   const shuffled = [...pool].sort(() => 0.5 - Math.random());
   const selected = shuffled.slice(0, 4);
   if (selected.length === 0) return;
@@ -223,74 +246,33 @@ function renderQuickQuestions(excludeQuestion) {
 }
 
 // This is the one function that "knows about" products — and it only
-// knows about them through shopConfig.products.categories, never by name.
-function respondToQuery(query) {
-  const text = query.toLowerCase();
-  const identity = shopConfig.identity;
-  const categories = [...((shopConfig.products && shopConfig.products.categories) || [])];
-
-  // If Square is connected, its synced items are just more categories to the
-  // engine — this is the seam where a real Catalog API pull replaces mock_catalog
-  // with live items, without anything else here changing.
-  const pos = shopConfig.pos_connection;
-  if (pos && pos.connected && pos.mock_catalog && pos.mock_catalog.length) {
-    // One category per Square category (e.g. "Vapes", "Concentrates"), so a
-    // question like "do you have vapes?" only shows vapes instead of everything
-    // synced from Square. Pushed before the catch-all below so a specific match
-    // wins (the matching loop stops at the first hit).
-    const byCategory = pos.mock_catalog_by_category || {};
-    Object.keys(byCategory).forEach(categoryName => {
-      if (categoryName === 'Uncategorized') return; // nothing useful to match on
-      const words = categoryName.toLowerCase().split(/\s+/).filter(Boolean);
-      categories.push({
-        key: 'square_' + categoryName.toLowerCase().replace(/\s+/g, '_'),
-        label: `${categoryName} (synced from Square)`,
-        keywords: [categoryName.toLowerCase(), ...words],
-        items: byCategory[categoryName]
-      });
+// knows about them by asking the server via /api/chat, never by name.
+async function respondToQuery(query) {
+  try {
+    const res = await fetch('./api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: query, token: ageToken })
     });
 
-    // Catch-all for generic "what's in stock" style questions across everything
-    // synced. Also the only bucket used for shops synced before this feature
-    // shipped, since mock_catalog_by_category won't exist on their config yet.
-    categories.push({
-      key: 'square_synced',
-      label: 'Live Inventory (synced from Square)',
-      keywords: ['square', 'live', 'synced', 'inventory', 'stock'],
-      items: pos.mock_catalog
-    });
-  }
-
-  let response = null;
-
-  // Try to match a product category by its configured keywords
-  for (const cat of categories) {
-    const matched = (cat.keywords || []).some(k => text.includes(k.toLowerCase()));
-    if (matched) {
-      response = `Here's what we have in ${cat.label}:\n\n`;
-      (cat.items || []).forEach((item, i) => {
-        response += `${i + 1}. ${item.name} - ${item.price}\n   ${item.details || ''}\n\n`;
-      });
-      break;
+    if (res.status === 403) {
+      // Token missing, expired, or invalid — the server won't say more than
+      // that, and the browser shouldn't guess why. Re-run the age gate.
+      addMessage("Let's confirm your age again before continuing.", 'bot');
+      awaitingAgeVerification = true;
+      if (shopInfo && shopInfo.compliance) {
+        addMessage(shopInfo.compliance.verification_prompt, 'bot');
+      }
+      renderYesNo();
+      return;
     }
-  }
 
-  if (!response && (text.includes('hour') || text.includes('open') || text.includes('close'))) {
-    response = `⏰ ${identity.hours_display}`;
+    const data = await res.json();
+    addMessage(data.response || "Sorry, I didn't catch that — could you rephrase?", 'bot');
+    renderQuickQuestions(query);
+  } catch (err) {
+    addMessage("Sorry, I'm having trouble connecting right now — please try again in a moment.", 'bot');
   }
-  if (!response && (text.includes('address') || text.includes('location') || text.includes('where'))) {
-    response = `📍 ${identity.address}`;
-  }
-  if (!response && (text.includes('hi') || text.includes('hello') || text.includes('hey'))) {
-    response = 'Hey! What can I help you find today?';
-  }
-  if (!response) {
-    const categoryList = categories.map(c => `✓ ${c.label}`).join('\n');
-    response = `I can help with:\n\n${categoryList}\n✓ Hours & location\n\nWhat are you interested in?`;
-  }
-
-  addMessage(response, 'bot');
-  renderQuickQuestions(query);
 }
 
 document.addEventListener('keypress', (e) => {
